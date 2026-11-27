@@ -183,6 +183,6 @@ if df is not None and not df.empty:
                                 st.markdown(answer)
                                 st.session_state.messages.append({"role": "assistant", "content": answer})
                             except Exception as e:
-                                st.error("API limit hit ho gayi ya key galat hai. 10 second baad dobara try karein.")
+                              st.error(f"Exact Error: {e}")
 else:
     st.info("Shuru karne ke liye sidebar se 'Sample Data' tick karein ya apni Excel/CSV file upload karein.")
