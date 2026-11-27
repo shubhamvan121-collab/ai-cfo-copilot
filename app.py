@@ -169,8 +169,38 @@ if df is not None and not df.empty:
 
                     with st.chat_message("assistant"):
                         with st.spinner("Analyzing numbers..."):
-                            try:
-                                client = genai.Client(api_key=api_key)
+                         try:
+    client = genai.Client(api_key=api_key)
+    history_text = "\n".join(
+        [f"{m['role']}: {m['content']}" for m in st.session_state.messages[-5:]]
+    )
+    full_prompt = f"{data_context}\n\nConversation History:\n{history_text}\n\nAnswer the latest user query clearly and concisely."
+
+    # Auto-fallback models list
+    models_to_try = ["gemini-3.8-flash-lite", "gemini-3.8-flash", "gemini-2.5-flash-lite"]
+    answer = None
+    last_err = None
+
+    for m_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=m_name,
+                contents=full_prompt
+            )
+            answer = response.text
+            break
+        except Exception as inner_e:
+            last_err = inner_e
+            continue
+
+    if answer:
+        st.markdown(answer)
+        st.session_state.messages.append({"role": "assistant", "content": answer})
+    else:
+        st.error(f"Sabhi models abhi busy hain. Error: {last_err}")
+except Exception as e:
+    st.error(f"Exact Error: {e}")
+                                
                                 # Include last 4 messages for follow-up memory
                                 history_text = "\n".join(
                                     [f"{m['role']}: {m['content']}" for m in st.session_state.messages[-5:]]
