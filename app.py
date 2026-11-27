@@ -115,7 +115,7 @@ if uploaded_file is not None:
             df_raw_noheader = pd.read_excel(xls, sheet_name=sheet_choice, header=None)
 
         file_key = f"{uploaded_file.name}_{sheet_choice}"
-        auto_clean = st.sidebar.checkbox("✨ Auto-Clean Messy File with AI (Screener/Tally)", value=False)
+        auto_clean = st.sidebar.checkbox("✨ Auto-Clean Messy File with AI (Screener/Tally)", value=True)
 
         if auto_clean:
             if not api_key:
