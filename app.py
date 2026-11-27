@@ -47,21 +47,24 @@ def tag_priority(cat_name):
         return "Semi-Discretionary"
     return "Core"
 
+def fmt_val(val, unit_suffix):
+    return f"₹{val:,.0f}{unit_suffix}"
+
 def ai_auto_clean_file(raw_df, api_key):
     client = genai.Client(api_key=api_key)
     raw_text = raw_df.head(60).to_csv(index=False, header=False)
 
     clean_prompt = f"""
     You are a Financial Data Engineer. Convert this messy financial spreadsheet (e.g., Screener.in, Tally, ERP export) into a clean CSV with EXACTLY 4 columns:
-    Account_Head,Category,Budget_INR,Actual_INR
+    Account_Head,Category,Previous_Period,Latest_Period
 
     STRICT RULES:
     1. Drop all percentage, ratio, margin, or growth rows (e.g., Tax %, Margin %, Growth %, Employee Cost %, EPS, Dividend Payout).
     2. Drop all subtotal/total rows (e.g., Gross Profit, EBITDA, Operating Profit, Financing Profit, PBT, Profit before tax, Net Profit, Total Assets, Total Liabilities).
     3. Map Account_Head strictly to one of these exact labels:
        Revenue, COGS, OpEx, Interest & Tax, Current Assets, Fixed Assets, Current Liabilities, Long-Term Debt, Equity, Operating Cash Flow, Investing Cash Flow, Financing Cash Flow
-    4. If the file has multiple years/periods, pick the 2 most recent numeric columns: put the older period in Budget_INR and the latest period in Actual_INR.
-    5. Use pure numbers only in Budget_INR and Actual_INR (no commas, no currency symbols, no % signs). Replace missing/blank values with 0.
+    4. If the file has multiple years/periods, pick the 2 most recent numeric columns: put the older period in Previous_Period and the latest period in Latest_Period.
+    5. Use pure numbers only in Previous_Period and Latest_Period (no commas, no currency symbols, no % signs). Replace missing/blank values with 0.
     6. Return ONLY the raw CSV text starting with the header line. No markdown backticks, no explanation.
 
     RAW DATA:
@@ -73,8 +76,8 @@ def ai_auto_clean_file(raw_df, api_key):
             resp = client.models.generate_content(model=m_name, contents=clean_prompt).text
             clean_csv = resp.replace("```csv", "").replace("```", "").strip()
             cleaned = pd.read_csv(io.StringIO(clean_csv))
-            cleaned["Budget_INR"] = pd.to_numeric(cleaned["Budget_INR"], errors="coerce").fillna(0)
-            cleaned["Actual_INR"] = pd.to_numeric(cleaned["Actual_INR"], errors="coerce").fillna(0)
+            cleaned["Previous_Period"] = pd.to_numeric(cleaned["Previous_Period"], errors="coerce").fillna(0)
+            cleaned["Latest_Period"] = pd.to_numeric(cleaned["Latest_Period"], errors="coerce").fillna(0)
             return cleaned
         except Exception:
             continue
@@ -82,7 +85,7 @@ def ai_auto_clean_file(raw_df, api_key):
 
 # --- SIDEBAR ---
 st.sidebar.title("⚙️ Control Panel")
-st.sidebar.caption("Auto-Adaptive FP&A Engine + AI Smart Data Cleaner.")
+st.sidebar.caption("Smart FP&A Engine + AI Auto-Cleaner + Plain-Language Insights.")
 
 api_key = st.secrets.get("GEMINI_API_KEY", None)
 if not api_key:
@@ -107,10 +110,7 @@ if uploaded_file is not None:
             df_raw_noheader = pd.read_csv(uploaded_file, header=None)
         else:
             xls = pd.ExcelFile(uploaded_file)
-            if len(xls.sheet_names) > 1:
-                sheet_choice = st.sidebar.selectbox("Select Excel Sheet", xls.sheet_names)
-            else:
-                sheet_choice = xls.sheet_names[0]
+            sheet_choice = st.sidebar.selectbox("Select Excel Sheet", xls.sheet_names) if len(xls.sheet_names) > 1 else xls.sheet_names[0]
             df_raw_header = pd.read_excel(xls, sheet_name=sheet_choice)
             df_raw_noheader = pd.read_excel(xls, sheet_name=sheet_choice, header=None)
 
@@ -132,7 +132,6 @@ if uploaded_file is not None:
                             st.error("AI file clean nahi kar paya. Normal mode me load kar rahe hain.")
                             st.session_state["cleaned_df"] = df_raw_header
                 df = st.session_state.get("cleaned_df", df_raw_header)
-                st.success("✨ AI Smart Cleaner active hai! Messy file automatically clean ho gayi hai.")
         else:
             df = df_raw_header
         use_sample = False
@@ -142,10 +141,9 @@ elif use_sample:
     df = load_sample_data(sample_mode)
 
 # --- MAIN APP ---
-st.title("📊 AI CFO Copilot — Adaptive Financial & FP&A Suite")
+st.title("📊 AI CFO Copilot — Smart Financial & FP&A Suite")
 
 if df is not None and not df.empty:
-    # Clean datetime & newline column names (Screener/Excel fix)
     df.columns = [
         c.strftime("%b %Y") if hasattr(c, "strftime") else str(c).strip()
         for c in df.columns
@@ -155,10 +153,16 @@ if df is not None and not df.empty:
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
 
     if len(text_cols) < 1 or len(num_cols) < 2:
-        st.warning("Dashboard ke liye kam se kam 1 Text column aur 2 Numeric columns chahiye. Agar file messy hai toh sidebar me '✨ Auto-Clean Messy File with AI' tick karein.")
+        st.warning("Dashboard ke liye kam se kam 1 Text column aur 2 Numeric columns chahiye.")
         st.dataframe(df.head())
     else:
-        st.sidebar.subheader("🔗 Column Mapping")
+        st.sidebar.subheader("🔗 Column & Unit Settings")
+
+        # Smart Unit Selector (Auto-guess Crores if max value < 1,00,000)
+        max_num = df[num_cols].abs().max().max()
+        default_unit_idx = 2 if (uploaded_file is not None and max_num < 100000) else 0
+        unit_choice = st.sidebar.selectbox("Currency Unit", ["INR (₹)", "Lakhs (₹ L)", "Crores (₹ Cr)"], index=default_unit_idx)
+        unit_suffix = "" if "INR" in unit_choice else (" L" if "Lakhs" in unit_choice else " Cr")
 
         head_options = ["None (Expense-Only Mode)"] + text_cols
         default_head_idx = 0
@@ -167,7 +171,7 @@ if df is not None and not df.empty:
                 default_head_idx = idx
                 break
 
-        head_col = st.sidebar.selectbox("Financial Head Column (Revenue/Assets/CF)", head_options, index=default_head_idx)
+        head_col = st.sidebar.selectbox("Financial Head Column", head_options, index=default_head_idx)
         default_cat_idx = 0
         for idx, col in enumerate(text_cols):
             if any(k in col.lower() for k in ["cat", "dept", "item", "particular", "desc"]):
@@ -175,13 +179,19 @@ if df is not None and not df.empty:
                 break
 
         cat_col = st.sidebar.selectbox("Category / Line Item Column", text_cols, index=default_cat_idx)
-        budget_col = st.sidebar.selectbox("Budget / Previous Period Column", num_cols, index=0)
-        actual_col = st.sidebar.selectbox("Actual / Latest Period Column", num_cols, index=1 if len(num_cols) > 1 else 0)
+        budget_col = st.sidebar.selectbox("Base / Budget / Previous Column", num_cols, index=0)
+        actual_col = st.sidebar.selectbox("Current / Actual / Latest Column", num_cols, index=1 if len(num_cols) > 1 else 0)
         threshold = st.sidebar.slider("Red Flag Variance Threshold (%)", 5, 50, 15)
+
+        # Smart Mode Labels (Budget vs Actual OR YoY Period Comparison)
+        is_budget_mode = "budget" in budget_col.lower() or "target" in budget_col.lower()
+        base_label = "Budget" if is_budget_mode else "Previous"
+        curr_label = "Actual" if is_budget_mode else "Latest"
 
         # --- AUTO-DETECTION ENGINE ---
         has_pnl, has_bs, has_cf = False, False, False
         ai_context_parts = []
+        verdict_points = []
 
         if head_col != "None (Expense-Only Mode)":
             df["_Head_Clean"] = df[head_col].astype(str).str.strip().str.lower()
@@ -190,7 +200,7 @@ if df is not None and not df.empty:
                 mask = df["_Head_Clean"].apply(lambda x: any(k in x for k in keywords))
                 return df.loc[mask, col_name].sum(), mask.any()
 
-            # 1. P&L Detection
+            # 1. P&L
             rev_a, m_rev = match_sum(["rev", "sales", "turnover", "income"], actual_col)
             rev_b, _ = match_sum(["rev", "sales", "turnover", "income"], budget_col)
             cogs_a, m_cogs = match_sum(["cogs", "cost of goods", "direct cost"], actual_col)
@@ -198,31 +208,27 @@ if df is not None and not df.empty:
             opex_a, m_opex = match_sum(["opex", "operating exp", "sga", "expense"], actual_col)
             opex_b, _ = match_sum(["opex", "operating exp", "sga", "expense"], budget_col)
             tax_a, _ = match_sum(["tax", "interest", "depreciation", "finance cost"], actual_col)
-            tax_b, _ = match_sum(["tax", "interest", "depreciation", "finance cost"], budget_col)
 
             has_pnl = m_rev or (m_cogs and m_opex)
 
-            # 2. Balance Sheet Detection
+            # 2. Balance Sheet
             ca_a, m_ca = match_sum(["current asset"], actual_col)
             fa_a, m_fa = match_sum(["fixed asset", "non-current asset"], actual_col)
             cl_a, m_cl = match_sum(["current liab"], actual_col)
             ltd_a, m_ltd = match_sum(["long-term", "debt", "borrowing", "non-current liab"], actual_col)
             eq_a, m_eq = match_sum(["equity", "reserve", "capital"], actual_col)
-
             has_bs = any([m_ca, m_fa, m_cl, m_ltd, m_eq])
 
-            # 3. Cash Flow Detection
+            # 3. Cash Flow
             ocf_a, m_ocf = match_sum(["operating cash", "ocf"], actual_col)
             icf_a, m_icf = match_sum(["investing cash", "capex"], actual_col)
             fcf_fin_a, m_fcf = match_sum(["financing cash"], actual_col)
-
             has_cf = any([m_ocf, m_icf, m_fcf])
 
             summary_df = df.groupby([head_col, cat_col], as_index=False)[[budget_col, actual_col]].sum()
         else:
             summary_df = df.groupby(cat_col, as_index=False)[[budget_col, actual_col]].sum()
 
-        # Variance Calculation
         summary_df["Variance"] = summary_df[actual_col] - summary_df[budget_col]
         summary_df["Variance_%"] = summary_df.apply(
             lambda r: round((r["Variance"] / abs(r[budget_col])) * 100, 2) if r[budget_col] != 0 else 0.0, axis=1
@@ -243,44 +249,67 @@ if df is not None and not df.empty:
         if has_bs: detected_modules.append("Balance Sheet")
         if has_cf: detected_modules.append("Cash Flow")
         if not detected_modules: detected_modules.append("Expense Variance")
-        st.caption(f"🔎 **Auto-Detected Modules:** {'  •  '.join(detected_modules)}")
+        st.caption(f"🔎 **Auto-Detected:** {' • '.join(detected_modules)}  |  **Comparison:** {base_label} vs {curr_label}  |  **Unit:** {unit_choice}")
 
         # --- 4 TABS ---
         tab1, tab2, tab3, tab4 = st.tabs([
-            "📈 Adaptive Executive Dashboard",
+            "📈 Smart Executive Dashboard",
             "🎯 Break-Even & Auto Cut-Down",
             "🔍 Budget Reconciliation",
             "🤖 AI CFO Chat"
         ])
 
-        # ==================== TAB 1: ADAPTIVE EXECUTIVE DASHBOARD ====================
+        # ==================== TAB 1: SMART EXECUTIVE DASHBOARD ====================
         with tab1:
+            # --- AUTO PLAIN-LANGUAGE CFO VERDICT ---
             if has_pnl:
-                st.subheader("1️⃣ Profit & Loss (P&L) Performance")
                 gp_a, gp_b = rev_a - cogs_a, rev_b - cogs_b
                 gm_a = round((gp_a / rev_a) * 100, 1) if rev_a else 0.0
                 gm_b = round((gp_b / rev_b) * 100, 1) if rev_b else 0.0
-
                 ebitda_a, ebitda_b = gp_a - opex_a, gp_b - opex_b
                 ebitda_m_a = round((ebitda_a / rev_a) * 100, 1) if rev_a else 0.0
                 ebitda_m_b = round((ebitda_b / rev_b) * 100, 1) if rev_b else 0.0
-
                 net_a = ebitda_a - tax_a
                 net_m_a = round((net_a / rev_a) * 100, 1) if rev_a else 0.0
-
-                c1, c2, c3, c4, c5 = st.columns(5)
                 rev_diff = round(((rev_a - rev_b) / abs(rev_b)) * 100, 1) if rev_b else 0.0
                 opex_diff = round(((opex_a - opex_b) / abs(opex_b)) * 100, 1) if opex_b else 0.0
 
-                c1.metric("Total Revenue", f"₹{rev_a:,.0f}", f"{rev_diff}% vs Prev/Bgt")
-                c2.metric("Gross Profit", f"₹{gp_a:,.0f}", f"GM: {gm_a}% (Prev {gm_b}%)")
-                c3.metric("Operating Exp (OpEx)", f"₹{opex_a:,.0f}", f"{opex_diff}% vs Prev/Bgt", delta_color="inverse")
-                c4.metric("EBITDA", f"₹{ebitda_a:,.0f}", f"Margin: {ebitda_m_a}% (Prev {ebitda_m_b}%)")
-                c5.metric("Net Profit (PAT)", f"₹{net_a:,.0f}", f"Net Margin: {net_m_a}%")
+                rev_word = "badha hai (📈)" if rev_diff >= 0 else "gira hai (📉)"
+                profit_word = "Profitable" if net_a > 0 else "Loss me"
+                verdict_points.append(f"**Business Health:** Company **{profit_word}** hai — Total Revenue **{fmt_val(rev_a, unit_suffix)}** ({rev_diff}% {rev_word}) aur Net Profit **{fmt_val(net_a, unit_suffix)}** ({net_m_a}% margin).")
+                verdict_points.append(f"**Operating Efficiency:** EBITDA Margin **{ebitda_m_a}%** hai (pichle period me {ebitda_m_b}% tha). Operating Expenses **{opex_diff}%** change hue hain.")
+
+            if has_bs:
+                tot_assets = ca_a + fa_a
+                tot_liab = cl_a + ltd_a
+                curr_ratio = round(ca_a / cl_a, 2) if cl_a > 0 else 0.0
+                debt_to_eq = round(tot_liab / eq_a, 2) if eq_a > 0 else 0.0
+                liq_status = "Safe & Liquid ✅" if curr_ratio >= 1.5 else "Liquidity Tight ⚠️"
+                verdict_points.append(f"**Balance Sheet Health:** Current Ratio **{curr_ratio}x** ({liq_status}) aur Debt-to-Equity **{debt_to_eq}x** hai.")
+
+            if not red_flags.empty:
+                top_rf = red_flags.sort_values("Variance_%", ascending=False).iloc[0]
+                verdict_points.append(f"**Action Alert:** `{top_rf[cat_col]}` me **{top_rf['Variance_%']}%** ka variance hai — isko review karein ya Tab 2 me cut-down simulate karein.")
+
+            if verdict_points:
+                with st.container(border=True):
+                    st.markdown("#### 🧠 Quick CFO Verdict (Simple Summary)")
+                    for pt in verdict_points:
+                        st.markdown(f"- {pt}")
+
+            # --- SECTION 1: P&L ---
+            if has_pnl:
+                st.subheader("1️⃣ Profit & Loss (P&L) Performance")
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("Total Revenue", fmt_val(rev_a, unit_suffix), f"{rev_diff}% vs {base_label}", help="Company ki kul kamai (Sales + Income).")
+                c2.metric("Gross Profit", fmt_val(gp_a, unit_suffix), f"GM: {gm_a}% ({base_label} {gm_b}%)", help="Revenue minus Direct Cost (COGS). Jitna zyada, utna achha.")
+                c3.metric("Operating Exp (OpEx)", fmt_val(opex_a, unit_suffix), f"{opex_diff}% vs {base_label}", delta_color="inverse", help="Business chalane ka kharch (Salaries, Marketing, Rent, Logistics).")
+                c4.metric("EBITDA", fmt_val(ebitda_a, unit_suffix), f"Margin: {ebitda_m_a}%", help="Core operating profit (Interest aur Tax katne se pehle). 15%+ healthy maana jata hai.")
+                c5.metric("Net Profit (PAT)", fmt_val(net_a, unit_suffix), f"Net Margin: {net_m_a}%", help="Saare kharch, Interest aur Tax ke baad bacha hua asli munafa.")
 
                 ai_context_parts.append(
-                    f"P&L: Revenue ₹{rev_a:,.0f} (Prev/Bgt ₹{rev_b:,.0f}), COGS ₹{cogs_a:,.0f}, "
-                    f"Gross Margin {gm_a}%, OpEx ₹{opex_a:,.0f}, EBITDA ₹{ebitda_a:,.0f} ({ebitda_m_a}%), Net Profit ₹{net_a:,.0f} ({net_m_a}%)."
+                    f"P&L ({unit_choice}): Revenue {fmt_val(rev_a, unit_suffix)} ({base_label} {fmt_val(rev_b, unit_suffix)}), "
+                    f"Gross Margin {gm_a}%, OpEx {fmt_val(opex_a, unit_suffix)}, EBITDA {fmt_val(ebitda_a, unit_suffix)} ({ebitda_m_a}%), Net Profit {fmt_val(net_a, unit_suffix)} ({net_m_a}%)."
                 )
 
                 col_l, col_r = st.columns(2)
@@ -292,64 +321,55 @@ if df is not None and not df.empty:
                         y=[rev_a, -cogs_a, 0, -opex_a, 0, -tax_a, 0],
                         textposition="outside"
                     ))
-                    fig_wf.update_layout(title="P&L Bridge (Revenue to Net Profit)", showlegend=False)
+                    fig_wf.update_layout(title="P&L Bridge (Revenue se Net Profit tak ka safar)", showlegend=False)
                     st.plotly_chart(fig_wf, use_container_width=True)
                 with col_r:
                     pnl_only = summary_df[summary_df[head_col].astype(str).str.lower().apply(
                         lambda x: any(k in x for k in ["rev", "sales", "cogs", "opex", "tax", "interest", "expense"])
                     )]
-                    fig_bar = px.bar(pnl_only, x=cat_col, y=[budget_col, actual_col], barmode="group", title="P&L Comparison")
+                    fig_bar = px.bar(pnl_only, x=cat_col, y=[budget_col, actual_col], barmode="group", title=f"P&L Comparison ({base_label} vs {curr_label})")
                     st.plotly_chart(fig_bar, use_container_width=True)
                 st.divider()
 
+            # --- SECTION 2: BALANCE SHEET ---
             if has_bs:
                 st.subheader("2️⃣ Balance Sheet & Financial Health")
-                tot_assets = ca_a + fa_a
-                tot_liab = cl_a + ltd_a
-                curr_ratio = round(ca_a / cl_a, 2) if cl_a > 0 else 0.0
-                debt_to_eq = round(tot_liab / eq_a, 2) if eq_a > 0 else 0.0
-
                 b1, b2, b3, b4 = st.columns(4)
-                b1.metric("Total Assets", f"₹{tot_assets:,.0f}")
-                b2.metric("Total Liabilities", f"₹{tot_liab:,.0f}")
-                b3.metric("Current Ratio", f"{curr_ratio}x", "Healthy > 1.5x")
-                b4.metric("Debt-to-Equity", f"{debt_to_eq}x", "Safe < 1.0x", delta_color="inverse")
+                b1.metric("Total Assets", fmt_val(tot_assets, unit_suffix), help="Company ki kul sampatti (Cash, Inventory, Plant, Machinery).")
+                b2.metric("Total Liabilities", fmt_val(tot_liab, unit_suffix), help="Company par kul karz aur baki payments.")
+                b3.metric("Current Ratio", f"{curr_ratio}x", "Healthy > 1.5x", help="Current Assets / Current Liabilities. 1.5x se upar matlab short-term bills dene ke liye paryapt cash hai.")
+                b4.metric("Debt-to-Equity", f"{debt_to_eq}x", "Safe < 1.0x", delta_color="inverse", help="Total Liabilities / Equity. 1.0x se kam matlab company par karz ka bojh kam hai.")
 
-                ai_context_parts.append(
-                    f"Balance Sheet: Total Assets ₹{tot_assets:,.0f}, Liabilities ₹{tot_liab:,.0f}, Equity ₹{eq_a:,.0f}, "
-                    f"Current Ratio {curr_ratio}x, Debt-to-Equity {debt_to_eq}x."
-                )
+                ai_context_parts.append(f"Balance Sheet: Assets {fmt_val(tot_assets, unit_suffix)}, Liabilities {fmt_val(tot_liab, unit_suffix)}, Current Ratio {curr_ratio}x, Debt-to-Equity {debt_to_eq}x.")
                 st.divider()
 
+            # --- SECTION 3: CASH FLOW ---
             if has_cf:
                 st.subheader("3️⃣ Cash Flow & Liquidity")
                 free_cf = ocf_a + icf_a
                 net_cf = ocf_a + icf_a + fcf_fin_a
-
                 f1, f2, f3, f4 = st.columns(4)
-                f1.metric("Operating Cash Flow", f"₹{ocf_a:,.0f}")
-                f2.metric("Investing Cash Flow (CapEx)", f"₹{icf_a:,.0f}")
-                f3.metric("Free Cash Flow (FCF)", f"₹{free_cf:,.0f}")
-                f4.metric("Net Cash Change", f"₹{net_cf:,.0f}")
+                f1.metric("Operating Cash Flow", fmt_val(ocf_a, unit_suffix), help="Asli business operations se haath me aaya hua cash.")
+                f2.metric("Investing CF (CapEx)", fmt_val(icf_a, unit_suffix), help="Nayi machine, building, ya tech kharidne me laga cash.")
+                f3.metric("Free Cash Flow (FCF)", fmt_val(free_cf, unit_suffix), help="Operating CF minus CapEx. Ye free cash growth ya debt kam karne ke liye bachta hai.")
+                f4.metric("Net Cash Change", fmt_val(net_cf, unit_suffix), help="Pure period me company ke bank balance me kul badlav.")
 
-                ai_context_parts.append(
-                    f"Cash Flow: Operating CF ₹{ocf_a:,.0f}, Investing CF ₹{icf_a:,.0f}, Free Cash Flow ₹{free_cf:,.0f}, Net Cash Change ₹{net_cf:,.0f}."
-                )
+                ai_context_parts.append(f"Cash Flow: Operating CF {fmt_val(ocf_a, unit_suffix)}, Free Cash Flow {fmt_val(free_cf, unit_suffix)}.")
                 st.divider()
 
+            # --- FALLBACK: EXPENSE-ONLY ---
             if not (has_pnl or has_bs or has_cf):
                 tot_b, tot_a = summary_df[budget_col].sum(), summary_df[actual_col].sum()
                 net_v = tot_a - tot_b
                 net_vp = round((net_v / abs(tot_b)) * 100, 2) if tot_b else 0.0
-
                 e1, e2, e3, e4 = st.columns(4)
-                e1.metric("Total Budget / Prev", f"₹{tot_b:,.0f}")
-                e2.metric("Total Actual / Latest", f"₹{tot_a:,.0f}")
-                e3.metric("Net Variance", f"₹{net_v:,.0f}", f"{net_vp}%", delta_color="inverse")
+                e1.metric(f"Total {base_label}", fmt_val(tot_b, unit_suffix))
+                e2.metric(f"Total {curr_label}", fmt_val(tot_a, unit_suffix))
+                e3.metric("Net Variance", fmt_val(net_v, unit_suffix), f"{net_vp}%", delta_color="inverse")
                 e4.metric("Red Flag Areas", f"{len(red_flags)} / {len(summary_df)}")
 
-                ai_context_parts.append(f"Expense Summary: Budget ₹{tot_b:,.0f}, Actual ₹{tot_a:,.0f}, Variance ₹{net_v:,.0f} ({net_vp}%).")
-                fig_bar = px.bar(summary_df, x=cat_col, y=[budget_col, actual_col], barmode="group", title="Budget vs Actual Comparison")
+                ai_context_parts.append(f"Summary: {base_label} {fmt_val(tot_b, unit_suffix)}, {curr_label} {fmt_val(tot_a, unit_suffix)}, Variance {net_vp}%.")
+                fig_bar = px.bar(summary_df, x=cat_col, y=[budget_col, actual_col], barmode="group", title=f"{base_label} vs {curr_label} Comparison")
                 st.plotly_chart(fig_bar, use_container_width=True)
                 st.divider()
 
@@ -359,7 +379,7 @@ if df is not None and not df.empty:
             else:
                 st.success("Koi bhi line item threshold se bahar nahi gaya hai!")
 
-            with st.expander("View Full Financial Summary Table (Verify AI-Cleaned Data)"):
+            with st.expander("View Full Financial Summary Table (Verify Data)"):
                 st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
         # ==================== TAB 2: BREAK-EVEN & AUTO CUT-DOWN ====================
@@ -390,130 +410,7 @@ if df is not None and not df.empty:
                 savings_needed = max(0.0, (proj_rev * (target_ebitda_pct / 100.0)) - proj_ebitda)
 
                 k1, k2, k3, k4 = st.columns(4)
-                k1.metric("Projected Revenue", f"₹{proj_rev:,.0f}", f"{rev_trend}% trend")
-                k2.metric("Break-Even Revenue", f"₹{break_even_rev:,.0f}")
-                k3.metric("Projected EBITDA", f"₹{proj_ebitda:,.0f}", f"Margin: {proj_ebitda_pct}%")
-                k4.metric("Budget Cut Needed", f"₹{savings_needed:,.0f}", delta_color="inverse")
-
-                opex_df = summary_df[summary_df[head_col].astype(str).str.lower().apply(
-                    lambda x: any(k in x for k in ["opex", "operating exp", "sga", "expense"])
-                )].copy()
-
-                if not opex_df.empty:
-                    opex_df["Projected_Spend"] = opex_df[actual_col] * (1 + inf_trend / 100.0)
-                    opex_df["Priority"] = opex_df[cat_col].apply(tag_priority)
-                    cut_caps = {"Discretionary": 0.35, "Semi-Discretionary": 0.15, "Core": 0.05}
-                    opex_df["_ord"] = opex_df["Priority"].map({"Discretionary": 1, "Semi-Discretionary": 2, "Core": 3})
-                    opex_df = opex_df.sort_values(by=["_ord", "Projected_Spend"], ascending=[True, False])
-
-                    rem = savings_needed
-                    cuts = []
-                    for _, r in opex_df.iterrows():
-                        c_val = min(rem, r["Projected_Spend"] * cut_caps[r["Priority"]]) if rem > 0 else 0.0
-                        cuts.append(round(c_val, 0))
-                        rem -= c_val
-
-                    opex_df["Recommended_Cut_INR"] = cuts
-                    opex_df["Cut_%"] = opex_df.apply(lambda r: round((r["Recommended_Cut_INR"] / r["Projected_Spend"]) * 100, 1) if r["Projected_Spend"] > 0 else 0.0, axis=1)
-                    opex_df["Revised_Budget_INR"] = opex_df["Projected_Spend"] - opex_df["Recommended_Cut_INR"]
-
-                    show_cols = [cat_col, "Priority", "Projected_Spend", "Recommended_Cut_INR", "Cut_%", "Revised_Budget_INR"]
-                    st.subheader("✂️ Auto-Generated Budget Cut-Down Plan")
-                    st.dataframe(opex_df[show_cols], use_container_width=True, hide_index=True)
-                    st.download_button("⬇️ Download Revised Budget (CSV)", opex_df[show_cols].to_csv(index=False).encode("utf-8"), "revised_budget.csv", "text/csv")
-
-        # ==================== TAB 3: BUDGET RECONCILIATION ====================
-        with tab3:
-            st.subheader("🔍 Automated Budget vs Actual Reconciliation")
-            rc1, rc2 = st.columns(2)
-            bgt_file = rc1.file_uploader("Upload Budget File", type=["xlsx", "csv"], key="rec_b")
-            act_file = rc2.file_uploader("Upload Actual ERP File", type=["xlsx", "csv"], key="rec_a")
-
-            if bgt_file and act_file:
-                try:
-                    df_b = pd.read_csv(bgt_file) if bgt_file.name.endswith(".csv") else pd.read_excel(bgt_file)
-                    df_a = pd.read_csv(act_file) if act_file.name.endswith(".csv") else pd.read_excel(act_file)
-                    common_cols = list(set(df_b.columns).intersection(set(df_a.columns)))
-                    if common_cols:
-                        key_col = st.selectbox("Common Key Column", common_cols)
-                        b_val = st.selectbox("Budget Amount Column", df_b.select_dtypes(include=["number"]).columns.tolist())
-                        a_val = st.selectbox("Actual Amount Column", df_a.select_dtypes(include=["number"]).columns.tolist())
-                        gb = df_b.groupby(key_col, as_index=False)[b_val].sum().rename(columns={b_val: "Budget_Amount"})
-                        ga = df_a.groupby(key_col, as_index=False)[a_val].sum().rename(columns={a_val: "Actual_Amount"})
-                        rec_df = pd.merge(gb, ga, on=key_col, how="outer", indicator=True).fillna(0)
-                        rec_df["Difference"] = rec_df["Actual_Amount"] - rec_df["Budget_Amount"]
-                        rec_df["Status"] = rec_df["_merge"].map({"both": "✅ Matched", "left_only": "🟡 Unutilized", "right_only": "🔴 Unbudgeted"})
-                        st.dataframe(rec_df.drop(columns=["_merge"]), use_container_width=True, hide_index=True)
-                    else:
-                        st.error("Dono files me kam se kam 1 common column hona chahiye.")
-                except Exception as e:
-                    st.error(f"Error: {e}")
-            else:
-                st.caption("Current loaded file ka quick reconciliation status:")
-                q_rec = summary_df.copy()
-                q_rec["Recon_Status"] = q_rec.apply(
-                    lambda r: "🔴 Unbudgeted" if r[budget_col] == 0 and r[actual_col] != 0 else ("🟡 Unutilized" if r[actual_col] == 0 and r[budget_col] != 0 else "✅ Reconciled"), axis=1
-                )
-                st.dataframe(q_rec[[cat_col, budget_col, actual_col, "Variance", "Recon_Status"]], use_container_width=True, hide_index=True)
-
-        # ==================== TAB 4: AI CFO CHAT ====================
-        with tab4:
-            st.subheader("💬 AI CFO Assistant")
-            if not api_key:
-                st.info("Sidebar me Gemini API key daalein.")
-            else:
-                if "messages" not in st.session_state:
-                    st.session_state.messages = []
-
-                q1, q2, q3 = st.columns(3)
-                qp = None
-                if q1.button("📉 Full Financial Health Review"):
-                    qp = "Mere uploaded financial data (P&L, Balance Sheet, Cash Flow jo bhi available hai) ka complete CFO health review do."
-                if q2.button("✂️ Cost Cut-Down Strategy"):
-                    qp = "Overruns aur market slowdown ko dekhte hue cost optimize karne ke top 3 recommendations do."
-                if q3.button("📋 Boardroom Summary"):
-                    qp = "Board meeting ke liye 4-bullet executive summary bana do."
-
-                for msg in st.session_state.messages:
-                    with st.chat_message(msg["role"]):
-                        st.markdown(msg["content"])
-
-                prompt = qp or st.chat_input("Apne financials ke baare me kuch bhi pucho...")
-                if prompt:
-                    st.session_state.messages.append({"role": "user", "content": prompt})
-                    with st.chat_message("user"):
-                        st.markdown(prompt)
-
-                    data_context = f"""
-                    You are an expert Corporate CFO & FP&A Analyst.
-                    Answer strictly based on these Python-verified financial figures. Do NOT invent numbers.
-
-                    VERIFIED METRICS:
-                    {chr(10).join(ai_context_parts)}
-
-                    DETAILED TABLE:
-                    {summary_df.to_markdown(index=False)}
-                    """
-
-                    with st.chat_message("assistant"):
-                        with st.spinner("Analyzing financials..."):
-                            try:
-                                client = genai.Client(api_key=api_key)
-                                hist = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.messages[-5:]])
-                                full_prompt = f"{data_context}\n\nHistory:\n{hist}\n\nAnswer concisely."
-                                ans = None
-                                for m_name in ["gemini-3.5-flash-lite", "gemini-3.8-flash"]:
-                                    try:
-                                        ans = client.models.generate_content(model=m_name, contents=full_prompt).text
-                                        break
-                                    except Exception:
-                                        continue
-                                if ans:
-                                    st.markdown(ans)
-                                    st.session_state.messages.append({"role": "assistant", "content": ans})
-                                else:
-                                    st.error("AI server abhi thoda busy hai. 5 second baad try karein.")
-                            except Exception as e:
-                                st.error(f"Error: {e}")
-else:
-    st.info("Sidebar se Sample Data tick karein ya apni Excel/CSV upload karein.")
+                k1.metric("Projected Revenue", fmt_val(proj_rev, unit_suffix), f"{rev_trend}% trend")
+                k2.metric("Break-Even Revenue", fmt_val(break_even_rev, unit_suffix), help="Zero loss ke liye minimum itna revenue chahiye.")
+                k3.metric("Projected EBITDA", fmt_val(proj_ebitda, unit_suffix), f"Margin: {proj_ebitda_pct}%")
+                k4.metric("Budget Cut Needed", fmt_val(savings_needed, unit_
