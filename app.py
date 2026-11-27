@@ -2,12 +2,11 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from google import genai
-from google.genai import types
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI CFO Copilot", page_icon="📊", layout="wide")
 
-# --- SAMPLE DATA GENERATOR (Recruiters ke liye 1-Click Test) ---
+# --- SAMPLE DATA GENERATOR ---
 @st.cache_data
 def load_sample_data():
     data = {
@@ -21,7 +20,6 @@ def load_sample_data():
 st.sidebar.title("⚙️ Control Panel")
 st.sidebar.caption("Demo Prototype: Upload anonymized or sample data only.")
 
-# API Key Handling (Streamlit Secrets ya Manual Input)
 api_key = st.secrets.get("GEMINI_API_KEY", None)
 if not api_key:
     api_key = st.sidebar.text_input("Gemini API Key (Free from AI Studio)", type="password")
@@ -48,7 +46,6 @@ elif use_sample:
 st.title("📊 AI CFO Copilot — Automated FP&A Analyzer")
 
 if df is not None and not df.empty:
-    # Auto-detect column types
     text_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
 
@@ -56,14 +53,13 @@ if df is not None and not df.empty:
         st.warning("Dashboard ke liye file me kam se kam 1 Category (text) aur 2 Numeric columns (jaise Budget aur Actual) hone chahiye.")
         st.dataframe(df.head())
     else:
-        # Dynamic Column Mapping in Sidebar
         st.sidebar.subheader("🔗 Column Mapping")
         cat_col = st.sidebar.selectbox("Category / Department Column", text_cols, index=0)
         budget_col = st.sidebar.selectbox("Budget / Target Column", num_cols, index=0)
         actual_col = st.sidebar.selectbox("Actual / Spend Column", num_cols, index=1 if len(num_cols) > 1 else 0)
         threshold = st.sidebar.slider("Red Flag Variance Threshold (%)", 5, 50, 15)
 
-        # --- PYTHON MATH ENGINE (Zero Hallucination) ---
+        # --- PYTHON MATH ENGINE ---
         summary_df = df.groupby(cat_col, as_index=False)[[budget_col, actual_col]].sum()
         summary_df["Variance"] = summary_df[actual_col] - summary_df[budget_col]
         summary_df["Variance_%"] = summary_df.apply(
@@ -83,7 +79,6 @@ if df is not None and not df.empty:
         tab1, tab2 = st.tabs(["📈 Executive Dashboard", "🤖 AI CFO Chat"])
 
         with tab1:
-            # KPI Cards
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Total Budget", f"₹{total_budget:,.0f}")
             c2.metric("Total Actual", f"₹{total_actual:,.0f}")
@@ -92,7 +87,6 @@ if df is not None and not df.empty:
 
             st.divider()
 
-            # Charts
             col_left, col_right = st.columns(2)
             with col_left:
                 fig_bar = px.bar(
@@ -108,7 +102,6 @@ if df is not None and not df.empty:
                 )
                 st.plotly_chart(fig_pie, use_container_width=True)
 
-            # Red Flag Table
             st.subheader(f"🚨 High Variance Alerts (Over {threshold}%)")
             if not red_flags.empty:
                 st.dataframe(red_flags, use_container_width=True, hide_index=True)
@@ -124,11 +117,9 @@ if df is not None and not df.empty:
             if not api_key:
                 st.info("AI Chat use karne ke liye sidebar me apni free Gemini API key daalein.")
             else:
-                # Initialize Chat History
                 if "messages" not in st.session_state:
                     st.session_state.messages = []
 
-                # 1-Click Quick Questions
                 q1, q2, q3 = st.columns(3)
                 quick_prompt = None
                 if q1.button("🔥 Sabse bada budget overrun kahan hai?"):
@@ -138,12 +129,10 @@ if df is not None and not df.empty:
                 if q3.button("📋 Boardroom Summary banao"):
                     quick_prompt = "CFO aur Board meeting ke liye is financial data ka 4-bullet executive summary bana do."
 
-                # Display previous messages
                 for msg in st.session_state.messages:
                     with st.chat_message(msg["role"]):
                         st.markdown(msg["content"])
 
-                # Chat Input
                 user_input = st.chat_input("Example: Operations me variance kyun zyada dikh raha hai?")
                 prompt = quick_prompt or user_input
 
@@ -152,7 +141,6 @@ if df is not None and not df.empty:
                     with st.chat_message("user"):
                         st.markdown(prompt)
 
-                    # Build Grounded Context (Sirf verified summary bhejna hai)
                     data_context = f"""
                     You are an expert Corporate CFO & FP&A Analyst.
                     Answer strictly based on this verified financial summary table. Do NOT invent numbers.
@@ -169,50 +157,35 @@ if df is not None and not df.empty:
 
                     with st.chat_message("assistant"):
                         with st.spinner("Analyzing numbers..."):
-                         try:
-    client = genai.Client(api_key=api_key)
-    history_text = "\n".join(
-        [f"{m['role']}: {m['content']}" for m in st.session_state.messages[-5:]]
-    )
-    full_prompt = f"{data_context}\n\nConversation History:\n{history_text}\n\nAnswer the latest user query clearly and concisely."
-
-    # Auto-fallback models list
-    models_to_try = ["gemini-3.8-flash-lite", "gemini-3.8-flash", "gemini-2.5-flash-lite"]
-    answer = None
-    last_err = None
-
-    for m_name in models_to_try:
-        try:
-            response = client.models.generate_content(
-                model=m_name,
-                contents=full_prompt
-            )
-            answer = response.text
-            break
-        except Exception as inner_e:
-            last_err = inner_e
-            continue
-
-    if answer:
-        st.markdown(answer)
-        st.session_state.messages.append({"role": "assistant", "content": answer})
-    else:
-        st.error(f"Sabhi models abhi busy hain. Error: {last_err}")
-except Exception as e:
-    st.error(f"Exact Error: {e}")
-                                
-                                # Include last 4 messages for follow-up memory
+                            try:
+                                client = genai.Client(api_key=api_key)
                                 history_text = "\n".join(
                                     [f"{m['role']}: {m['content']}" for m in st.session_state.messages[-5:]]
                                 )
-                                response = client.models.generate_content(
-                                 model="gemini-3.8-flash",
-                                    contents=f"{data_context}\n\nConversation History:\n{history_text}\n\nAnswer the latest user query clearly and concisely."
-                                )
-                                answer = response.text
-                                st.markdown(answer)
-                                st.session_state.messages.append({"role": "assistant", "content": answer})
+                                full_prompt = f"{data_context}\n\nConversation History:\n{history_text}\n\nAnswer the latest user query clearly and concisely."
+
+                                models_to_try = ["gemini-3.8-flash-lite", "gemini-3.8-flash", "gemini-2.5-flash-lite"]
+                                answer = None
+                                last_err = None
+
+                                for m_name in models_to_try:
+                                    try:
+                                        response = client.models.generate_content(
+                                            model=m_name,
+                                            contents=full_prompt
+                                        )
+                                        answer = response.text
+                                        break
+                                    except Exception as inner_e:
+                                        last_err = inner_e
+                                        continue
+
+                                if answer:
+                                    st.markdown(answer)
+                                    st.session_state.messages.append({"role": "assistant", "content": answer})
+                                else:
+                                    st.error(f"Sabhi models abhi busy hain. Error: {last_err}")
                             except Exception as e:
-                              st.error(f"Exact Error: {e}")
+                                st.error(f"Exact Error: {e}")
 else:
     st.info("Shuru karne ke liye sidebar se 'Sample Data' tick karein ya apni Excel/CSV file upload karein.")
