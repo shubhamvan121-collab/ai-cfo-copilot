@@ -163,8 +163,8 @@ if df is not None and not df.empty:
                                     [f"{m['role']}: {m['content']}" for m in st.session_state.messages[-5:]]
                                 )
                                 full_prompt = f"{data_context}\n\nConversation History:\n{history_text}\n\nAnswer the latest user query clearly and concisely."
-
-                                        models_to_try = ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
+                                
+                                models_to_try = ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
                                 answer = None
                                 last_err = None
 
