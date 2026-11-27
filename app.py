@@ -176,7 +176,7 @@ if df is not None and not df.empty:
                                     [f"{m['role']}: {m['content']}" for m in st.session_state.messages[-5:]]
                                 )
                                 response = client.models.generate_content(
-                                    model="gemini-2.5-flash",
+                                 model="gemini-3.8-flash",
                                     contents=f"{data_context}\n\nConversation History:\n{history_text}\n\nAnswer the latest user query clearly and concisely."
                                 )
                                 answer = response.text
