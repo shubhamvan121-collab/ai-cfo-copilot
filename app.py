@@ -1,3 +1,4 @@
+import io
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -46,9 +47,42 @@ def tag_priority(cat_name):
         return "Semi-Discretionary"
     return "Core"
 
+def ai_auto_clean_file(raw_df, api_key):
+    client = genai.Client(api_key=api_key)
+    raw_text = raw_df.head(60).to_csv(index=False, header=False)
+
+    clean_prompt = f"""
+    You are a Financial Data Engineer. Convert this messy financial spreadsheet (e.g., Screener.in, Tally, ERP export) into a clean CSV with EXACTLY 4 columns:
+    Account_Head,Category,Budget_INR,Actual_INR
+
+    STRICT RULES:
+    1. Drop all percentage, ratio, margin, or growth rows (e.g., Tax %, Margin %, Growth %, Employee Cost %, EPS, Dividend Payout).
+    2. Drop all subtotal/total rows (e.g., Gross Profit, EBITDA, Operating Profit, Financing Profit, PBT, Profit before tax, Net Profit, Total Assets, Total Liabilities).
+    3. Map Account_Head strictly to one of these exact labels:
+       Revenue, COGS, OpEx, Interest & Tax, Current Assets, Fixed Assets, Current Liabilities, Long-Term Debt, Equity, Operating Cash Flow, Investing Cash Flow, Financing Cash Flow
+    4. If the file has multiple years/periods, pick the 2 most recent numeric columns: put the older period in Budget_INR and the latest period in Actual_INR.
+    5. Use pure numbers only in Budget_INR and Actual_INR (no commas, no currency symbols, no % signs). Replace missing/blank values with 0.
+    6. Return ONLY the raw CSV text starting with the header line. No markdown backticks, no explanation.
+
+    RAW DATA:
+    {raw_text}
+    """
+
+    for m_name in ["gemini-3.5-flash-lite", "gemini-3.8-flash"]:
+        try:
+            resp = client.models.generate_content(model=m_name, contents=clean_prompt).text
+            clean_csv = resp.replace("```csv", "").replace("```", "").strip()
+            cleaned = pd.read_csv(io.StringIO(clean_csv))
+            cleaned["Budget_INR"] = pd.to_numeric(cleaned["Budget_INR"], errors="coerce").fillna(0)
+            cleaned["Actual_INR"] = pd.to_numeric(cleaned["Actual_INR"], errors="coerce").fillna(0)
+            return cleaned
+        except Exception:
+            continue
+    return None
+
 # --- SIDEBAR ---
 st.sidebar.title("⚙️ Control Panel")
-st.sidebar.caption("Auto-Adaptive FP&A Engine: P&L, Balance Sheet, Cash Flow & Expenses.")
+st.sidebar.caption("Auto-Adaptive FP&A Engine + AI Smart Data Cleaner.")
 
 api_key = st.secrets.get("GEMINI_API_KEY", None)
 if not api_key:
@@ -62,22 +96,48 @@ sample_mode = st.sidebar.selectbox(
 use_sample = st.sidebar.checkbox("Use Sample Data", value=True)
 uploaded_file = st.sidebar.file_uploader("Ya apni Excel/CSV upload karo", type=["xlsx", "csv"])
 
-# --- DATA LOADING (Multi-Sheet Excel Support) ---
+# --- DATA LOADING + AI SMART CLEANER ---
 df = None
 if uploaded_file is not None:
     try:
+        sheet_choice = None
         if uploaded_file.name.endswith(".csv"):
-            df = pd.read_csv(uploaded_file)
+            df_raw_header = pd.read_csv(uploaded_file)
+            uploaded_file.seek(0)
+            df_raw_noheader = pd.read_csv(uploaded_file, header=None)
         else:
             xls = pd.ExcelFile(uploaded_file)
             if len(xls.sheet_names) > 1:
                 sheet_choice = st.sidebar.selectbox("Select Excel Sheet", xls.sheet_names)
-                df = pd.read_excel(xls, sheet_name=sheet_choice)
             else:
-                df = pd.read_excel(xls)
+                sheet_choice = xls.sheet_names[0]
+            df_raw_header = pd.read_excel(xls, sheet_name=sheet_choice)
+            df_raw_noheader = pd.read_excel(xls, sheet_name=sheet_choice, header=None)
+
+        file_key = f"{uploaded_file.name}_{sheet_choice}"
+        auto_clean = st.sidebar.checkbox("✨ Auto-Clean Messy File with AI (Screener/Tally)", value=False)
+
+        if auto_clean:
+            if not api_key:
+                st.sidebar.warning("AI Auto-Clean ke liye Gemini API key zaroori hai.")
+                df = df_raw_header
+            else:
+                if st.session_state.get("cleaned_file_key") != file_key:
+                    with st.spinner("🤖 AI aapki raw file ko clean aur standardize kar raha hai..."):
+                        cleaned_df = ai_auto_clean_file(df_raw_noheader, api_key)
+                        if cleaned_df is not None and not cleaned_df.empty:
+                            st.session_state["cleaned_df"] = cleaned_df
+                            st.session_state["cleaned_file_key"] = file_key
+                        else:
+                            st.error("AI file clean nahi kar paya. Normal mode me load kar rahe hain.")
+                            st.session_state["cleaned_df"] = df_raw_header
+                df = st.session_state.get("cleaned_df", df_raw_header)
+                st.success("✨ AI Smart Cleaner active hai! Messy file automatically clean ho gayi hai.")
+        else:
+            df = df_raw_header
         use_sample = False
     except Exception as e:
-        st.error(f"File padhne me dikkat aayi. Ensure karein ki Row 1 me clean headers hon. Error: {e}")
+        st.error(f"File padhne me dikkat aayi. Error: {e}")
 elif use_sample:
     df = load_sample_data(sample_mode)
 
@@ -90,11 +150,12 @@ if df is not None and not df.empty:
         c.strftime("%b %Y") if hasattr(c, "strftime") else str(c).strip()
         for c in df.columns
     ]
+
     text_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
 
     if len(text_cols) < 1 or len(num_cols) < 2:
-        st.warning("Dashboard ke liye kam se kam 1 Text column aur 2 Numeric columns (Budget, Actual) chahiye.")
+        st.warning("Dashboard ke liye kam se kam 1 Text column aur 2 Numeric columns chahiye. Agar file messy hai toh sidebar me '✨ Auto-Clean Messy File with AI' tick karein.")
         st.dataframe(df.head())
     else:
         st.sidebar.subheader("🔗 Column Mapping")
@@ -114,8 +175,8 @@ if df is not None and not df.empty:
                 break
 
         cat_col = st.sidebar.selectbox("Category / Line Item Column", text_cols, index=default_cat_idx)
-        budget_col = st.sidebar.selectbox("Budget / Target Column", num_cols, index=0)
-        actual_col = st.sidebar.selectbox("Actual Column", num_cols, index=1 if len(num_cols) > 1 else 0)
+        budget_col = st.sidebar.selectbox("Budget / Previous Period Column", num_cols, index=0)
+        actual_col = st.sidebar.selectbox("Actual / Latest Period Column", num_cols, index=1 if len(num_cols) > 1 else 0)
         threshold = st.sidebar.slider("Red Flag Variance Threshold (%)", 5, 50, 15)
 
         # --- AUTO-DETECTION ENGINE ---
@@ -157,7 +218,6 @@ if df is not None and not df.empty:
 
             has_cf = any([m_ocf, m_icf, m_fcf])
 
-            # Build Summary Table
             summary_df = df.groupby([head_col, cat_col], as_index=False)[[budget_col, actual_col]].sum()
         else:
             summary_df = df.groupby(cat_col, as_index=False)[[budget_col, actual_col]].sum()
@@ -178,7 +238,6 @@ if df is not None and not df.empty:
         summary_df["Status"] = summary_df.apply(get_status, axis=1)
         red_flags = summary_df[summary_df["Status"].str.contains("🔴")]
 
-        # Active Modules Badge
         detected_modules = []
         if has_pnl: detected_modules.append("P&L Statement")
         if has_bs: detected_modules.append("Balance Sheet")
@@ -196,7 +255,6 @@ if df is not None and not df.empty:
 
         # ==================== TAB 1: ADAPTIVE EXECUTIVE DASHBOARD ====================
         with tab1:
-            # --- SECTION 1: P&L ---
             if has_pnl:
                 st.subheader("1️⃣ Profit & Loss (P&L) Performance")
                 gp_a, gp_b = rev_a - cogs_a, rev_b - cogs_b
@@ -211,17 +269,17 @@ if df is not None and not df.empty:
                 net_m_a = round((net_a / rev_a) * 100, 1) if rev_a else 0.0
 
                 c1, c2, c3, c4, c5 = st.columns(5)
-                rev_diff = round(((rev_a - rev_b) / rev_b) * 100, 1) if rev_b else 0.0
-                opex_diff = round(((opex_a - opex_b) / opex_b) * 100, 1) if opex_b else 0.0
+                rev_diff = round(((rev_a - rev_b) / abs(rev_b)) * 100, 1) if rev_b else 0.0
+                opex_diff = round(((opex_a - opex_b) / abs(opex_b)) * 100, 1) if opex_b else 0.0
 
-                c1.metric("Total Revenue", f"₹{rev_a:,.0f}", f"{rev_diff}% vs Bgt")
-                c2.metric("Gross Profit", f"₹{gp_a:,.0f}", f"GM: {gm_a}% (Bgt {gm_b}%)")
-                c3.metric("Operating Exp (OpEx)", f"₹{opex_a:,.0f}", f"{opex_diff}% vs Bgt", delta_color="inverse")
-                c4.metric("EBITDA", f"₹{ebitda_a:,.0f}", f"Margin: {ebitda_m_a}% (Bgt {ebitda_m_b}%)")
+                c1.metric("Total Revenue", f"₹{rev_a:,.0f}", f"{rev_diff}% vs Prev/Bgt")
+                c2.metric("Gross Profit", f"₹{gp_a:,.0f}", f"GM: {gm_a}% (Prev {gm_b}%)")
+                c3.metric("Operating Exp (OpEx)", f"₹{opex_a:,.0f}", f"{opex_diff}% vs Prev/Bgt", delta_color="inverse")
+                c4.metric("EBITDA", f"₹{ebitda_a:,.0f}", f"Margin: {ebitda_m_a}% (Prev {ebitda_m_b}%)")
                 c5.metric("Net Profit (PAT)", f"₹{net_a:,.0f}", f"Net Margin: {net_m_a}%")
 
                 ai_context_parts.append(
-                    f"P&L: Revenue ₹{rev_a:,.0f} (Bgt ₹{rev_b:,.0f}), COGS ₹{cogs_a:,.0f}, "
+                    f"P&L: Revenue ₹{rev_a:,.0f} (Prev/Bgt ₹{rev_b:,.0f}), COGS ₹{cogs_a:,.0f}, "
                     f"Gross Margin {gm_a}%, OpEx ₹{opex_a:,.0f}, EBITDA ₹{ebitda_a:,.0f} ({ebitda_m_a}%), Net Profit ₹{net_a:,.0f} ({net_m_a}%)."
                 )
 
@@ -240,11 +298,10 @@ if df is not None and not df.empty:
                     pnl_only = summary_df[summary_df[head_col].astype(str).str.lower().apply(
                         lambda x: any(k in x for k in ["rev", "sales", "cogs", "opex", "tax", "interest", "expense"])
                     )]
-                    fig_bar = px.bar(pnl_only, x=cat_col, y=[budget_col, actual_col], barmode="group", title="P&L Budget vs Actual")
+                    fig_bar = px.bar(pnl_only, x=cat_col, y=[budget_col, actual_col], barmode="group", title="P&L Comparison")
                     st.plotly_chart(fig_bar, use_container_width=True)
                 st.divider()
 
-            # --- SECTION 2: BALANCE SHEET ---
             if has_bs:
                 st.subheader("2️⃣ Balance Sheet & Financial Health")
                 tot_assets = ca_a + fa_a
@@ -264,10 +321,9 @@ if df is not None and not df.empty:
                 )
                 st.divider()
 
-            # --- SECTION 3: CASH FLOW ---
             if has_cf:
                 st.subheader("3️⃣ Cash Flow & Liquidity")
-                free_cf = ocf_a + icf_a  # icf_a is negative for CapEx
+                free_cf = ocf_a + icf_a
                 net_cf = ocf_a + icf_a + fcf_fin_a
 
                 f1, f2, f3, f4 = st.columns(4)
@@ -281,15 +337,14 @@ if df is not None and not df.empty:
                 )
                 st.divider()
 
-            # --- FALLBACK: EXPENSE-ONLY MODE ---
             if not (has_pnl or has_bs or has_cf):
                 tot_b, tot_a = summary_df[budget_col].sum(), summary_df[actual_col].sum()
                 net_v = tot_a - tot_b
-                net_vp = round((net_v / tot_b) * 100, 2) if tot_b else 0.0
+                net_vp = round((net_v / abs(tot_b)) * 100, 2) if tot_b else 0.0
 
                 e1, e2, e3, e4 = st.columns(4)
-                e1.metric("Total Budget", f"₹{tot_b:,.0f}")
-                e2.metric("Total Actual", f"₹{tot_a:,.0f}")
+                e1.metric("Total Budget / Prev", f"₹{tot_b:,.0f}")
+                e2.metric("Total Actual / Latest", f"₹{tot_a:,.0f}")
                 e3.metric("Net Variance", f"₹{net_v:,.0f}", f"{net_vp}%", delta_color="inverse")
                 e4.metric("Red Flag Areas", f"{len(red_flags)} / {len(summary_df)}")
 
@@ -298,14 +353,13 @@ if df is not None and not df.empty:
                 st.plotly_chart(fig_bar, use_container_width=True)
                 st.divider()
 
-            # --- RED FLAGS & FULL TABLE ---
             st.subheader(f"🚨 High Variance Alerts (Threshold: {threshold}%)")
             if not red_flags.empty:
                 st.dataframe(red_flags, use_container_width=True, hide_index=True)
             else:
                 st.success("Koi bhi line item threshold se bahar nahi gaya hai!")
 
-            with st.expander("View Full Financial Summary Table"):
+            with st.expander("View Full Financial Summary Table (Verify AI-Cleaned Data)"):
                 st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
         # ==================== TAB 2: BREAK-EVEN & AUTO CUT-DOWN ====================
@@ -342,7 +396,7 @@ if df is not None and not df.empty:
                 k4.metric("Budget Cut Needed", f"₹{savings_needed:,.0f}", delta_color="inverse")
 
                 opex_df = summary_df[summary_df[head_col].astype(str).str.lower().apply(
-                    lambda x: any(k in x for k in ["opex", "operating exp", "sga"])
+                    lambda x: any(k in x for k in ["opex", "operating exp", "sga", "expense"])
                 )].copy()
 
                 if not opex_df.empty:
@@ -462,5 +516,4 @@ if df is not None and not df.empty:
                             except Exception as e:
                                 st.error(f"Error: {e}")
 else:
-    st.info("Sidebar se Sample Data tick karein ya apni Excel/CSV upload karein.")
     st.info("Sidebar se Sample Data tick karein ya apni Excel/CSV upload karein.")
