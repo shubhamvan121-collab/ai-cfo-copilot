@@ -85,6 +85,11 @@ elif use_sample:
 st.title("📊 AI CFO Copilot — Adaptive Financial & FP&A Suite")
 
 if df is not None and not df.empty:
+    # Clean datetime & newline column names (Screener/Excel fix)
+    df.columns = [
+        c.strftime("%b %Y") if hasattr(c, "strftime") else str(c).strip()
+        for c in df.columns
+    ]
     text_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
 
