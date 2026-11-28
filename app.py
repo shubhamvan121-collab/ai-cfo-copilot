@@ -727,4 +727,3 @@ if df is not None and not df.empty:
                 st.dataframe(q_rec[[cat_col, budget_col, actual_col, "Variance", "Recon_Status"]], use_container_width=True, hide_index=True)
 else:
     st.info("Sidebar se Sample Data tick karein ya apni P&L, Balance Sheet, Cash Flow, aur Forecast files ek saath upload karein.")
-Planning financial application upgrades for multiple file uploads
